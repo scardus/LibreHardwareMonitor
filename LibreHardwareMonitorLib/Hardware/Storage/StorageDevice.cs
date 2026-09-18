@@ -14,6 +14,7 @@ using BlackSharp.Core.Converters;
 using BlackSharp.Core.Converters.Enums;
 using DiskInfoToolkit;
 using DiskInfoToolkit.Smart;
+using LibreHardwareMonitor.Hardware.Storage.StorageSpaces;
 using Windows.Win32;
 using Windows.Win32.Foundation;
 using Windows.Win32.Storage.FileSystem;
@@ -49,6 +50,7 @@ public sealed class StorageDevice : Hardware, ISmart
     private Sensor _sensorDiskWriteRate;
     private Sensor _usageSensor;
     private Sensor _freeSpaceSensor;
+    private Sensor _storageSpacesHealthSensor;
 
     public StorageDevice(StorageDeviceDIT storage, ISettings settings)
         : base(storage.ProductName, GetIdentifier(storage), settings)
@@ -94,6 +96,8 @@ public sealed class StorageDevice : Hardware, ISmart
             isDevicePoweredOn = _storage.IsDevicePowerOn.GetValueOrDefault(true);
         }
 
+        UpdateStorageSpacesSensors();
+
         bool hasChanges = false;
 
         //No updates for sleeping devices if we should not wake it up
@@ -138,6 +142,59 @@ public sealed class StorageDevice : Hardware, ISmart
 
         // Update general sensors
         _sensors.ForEach(s => s.Update(_storage));
+    }
+
+    public override IDictionary<string, string> Properties
+    {
+        get
+        {
+            var properties = new SortedDictionary<string, string>();
+            StorageSpacesVirtualDiskInfo virtualDisk = FindStorageSpacesVirtualDisk();
+
+            if (virtualDisk != null)
+            {
+                if (!string.IsNullOrEmpty(virtualDisk.Resiliency))
+                    properties.Add("Resiliency", virtualDisk.Resiliency);
+
+                if (virtualDisk.NumberOfDataCopies.HasValue)
+                    properties.Add("Data Copies", virtualDisk.NumberOfDataCopies.Value.ToString());
+
+                if (virtualDisk.NumberOfColumns.HasValue)
+                    properties.Add("Columns", virtualDisk.NumberOfColumns.Value.ToString());
+            }
+
+            return properties;
+        }
+    }
+
+    private void UpdateStorageSpacesSensors()
+    {
+        if (_storageSpacesHealthSensor == null)
+            return;
+
+        StorageSpacesVirtualDiskInfo virtualDisk = FindStorageSpacesVirtualDisk();
+        if (virtualDisk != null)
+            _storageSpacesHealthSensor.Value = virtualDisk.HealthStatus;
+    }
+
+    private StorageSpacesVirtualDiskInfo FindStorageSpacesVirtualDisk()
+    {
+        StorageSpacesSnapshot snapshot = StorageSpacesData.Snapshot;
+        if (snapshot == null || !_storage.StorageDeviceNumber.HasValue)
+            return null;
+
+        int deviceNumber = (int)_storage.StorageDeviceNumber.Value;
+
+        foreach (StorageSpacesPoolInfo pool in snapshot.Pools)
+        {
+            foreach (StorageSpacesVirtualDiskInfo virtualDisk in pool.VirtualDisks)
+            {
+                if (virtualDisk.DeviceNumber == deviceNumber)
+                    return virtualDisk;
+            }
+        }
+
+        return null;
     }
 
     public override string GetReport()
@@ -360,6 +417,14 @@ public sealed class StorageDevice : Hardware, ISmart
 
         _sensorDiskWriteRate = new Sensor("Write Rate", 55, SensorType.Throughput, this, _settings);
         ActivateSensor(_sensorDiskWriteRate);
+
+        // A Storage Spaces virtual disk is enumerated like any other disk but reports no health of
+        // its own. The group owning the snapshot is registered first, so it is already available.
+        if (FindStorageSpacesVirtualDisk() != null)
+        {
+            _storageSpacesHealthSensor = new Sensor("Health", 40, SensorType.Health, this, _settings);
+            ActivateSensor(_storageSpacesHealthSensor);
+        }
 
         AddSmartAttributeSensors();
     }
